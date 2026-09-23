@@ -38,9 +38,13 @@ static esp_netif_t *s_netif = NULL;
  *  MAC address, which need to be the same so the AP would see one device (virtual eth-NIC).
  *  No need to modify the ethernet frames here, as we can set the station's MAC to the USB NCM device.
  */
-void mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, uint8_t own_mac[6])
+bool mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, uint8_t own_mac[6])
 {
-
+    (void)direction;
+    (void)buffer;
+    (void)len;
+    (void)own_mac;
+    return true;
 }
 
 esp_err_t wired_bridge_init(wired_rx_cb_t rx_cb, wired_free_cb_t free_cb)

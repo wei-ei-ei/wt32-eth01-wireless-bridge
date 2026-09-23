@@ -3,6 +3,9 @@
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
+#include <stdlib.h>
+#include <string.h>
+
 #include <network_provisioning/manager.h>
 #include <network_provisioning/scheme_ble.h>
 #include "esp_log.h"
@@ -10,8 +13,10 @@
 #include "esp_event.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "wifi_profile_prov.h"
+#include "wifi_profile_store.h"
 
-static const char *TAG = "NCM_provisioning";
+static const char *TAG = "wt32_bridge_prov";
 
 #if CONFIG_EXAMPLE_PROV_SECURITY_VERSION_2
 #if CONFIG_EXAMPLE_PROV_SEC2_DEV_MODE
@@ -86,6 +91,8 @@ struct events {
     int success_bit;
     int fail_bit;
     bool success;
+    bool have_pending_config;
+    wifi_sta_config_t pending_config;
 };
 
 static void event_handler(void *arg, esp_event_base_t event_base,
@@ -98,10 +105,11 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         break;
     case NETWORK_PROV_WIFI_CRED_RECV: {
         wifi_sta_config_t *wifi_sta_cfg = (wifi_sta_config_t *) event_data;
-        ESP_LOGI(TAG, "Received Wi-Fi credentials"
-                 "\n\tSSID     : %s\n\tPassword : %s",
-                 (const char *) wifi_sta_cfg->ssid,
-                 (const char *) wifi_sta_cfg->password);
+        memcpy(&handler_args->pending_config, wifi_sta_cfg, sizeof(handler_args->pending_config));
+        handler_args->have_pending_config = true;
+        ESP_LOGI(TAG, "Received Wi-Fi credentials for SSID: %.*s",
+                 (int)strnlen((const char *)wifi_sta_cfg->ssid, sizeof(wifi_sta_cfg->ssid)),
+                 (const char *)wifi_sta_cfg->ssid);
         break;
     }
     case NETWORK_PROV_WIFI_CRED_FAIL: {
@@ -116,6 +124,18 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
     case NETWORK_PROV_WIFI_CRED_SUCCESS:
         ESP_LOGI(TAG, "Provisioning successful");
+        if (handler_args->have_pending_config) {
+            uint16_t profile_id = 0;
+            esp_err_t err = wifi_profile_store_upsert(&handler_args->pending_config, &profile_id);
+            if (err == ESP_OK) {
+                err = wifi_profile_store_set_active(profile_id);
+            }
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Stored Wi-Fi profile id %u", (unsigned)profile_id);
+            } else {
+                ESP_LOGW(TAG, "Failed to store Wi-Fi profile: %s", esp_err_to_name(err));
+            }
+        }
         handler_args->success = true;
         break;
     case NETWORK_PROV_END:
@@ -189,12 +209,17 @@ esp_err_t start_provisioning(EventGroupHandle_t *flags, int success_bit, int fai
     network_prov_security2_params_t *sec_params = &sec2_params;
 #endif // CONFIG_EXAMPLE_PROV_SECURITY_VERSION_0 (VERSION_1, VERSION_2)
 
+    ESP_ERROR_CHECK(wifi_profile_prov_endpoint_create());
     ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(security, (const void *) sec_params, "PROV_", NULL));
+    ESP_ERROR_CHECK(wifi_profile_prov_endpoint_register());
     return ESP_OK;
 }
 
 bool is_provisioned(void)
 {
+    if (wifi_profile_store_has_active()) {
+        return true;
+    }
     bool provisioned = false;
     ESP_ERROR_CHECK(network_prov_mgr_is_wifi_provisioned(&provisioned));
     return provisioned;

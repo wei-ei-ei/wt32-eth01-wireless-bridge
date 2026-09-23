@@ -1,4 +1,4 @@
-menu "Example Configuration"
+menu "WT32-ETH01 Bridge Configuration"
 
     orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
 
@@ -85,6 +85,14 @@ menu "Example Configuration"
             The button on this GPIO is used to reset the board to
             the reconfiguration mode, i.e. to restart provisioning
             or manual configuration of Wi-Fi settings (ssid, password)
+
+    config EXAMPLE_WIFI_PROFILE_MAX_COUNT
+        int "Maximum number of stored Wi-Fi profiles"
+        range 1 32
+        default 16
+        help
+            Maximum number of Wi-Fi SSID/password profiles stored in NVS.
+            The bridge loads only the active profile during normal startup.
 
     if EXAMPLE_WIRED_INTERFACE_IS_ETHERNET
 

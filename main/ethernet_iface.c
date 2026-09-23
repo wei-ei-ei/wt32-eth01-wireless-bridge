@@ -13,6 +13,7 @@
 #include "esp_mac.h"
 #include "ethernet_init.h"
 #include "esp_eth_netif_glue.h"
+#include "freertos/FreeRTOS.h"
 
 /**
  *  Disable promiscuous mode on Ethernet interface by setting this macro to 0
@@ -28,12 +29,79 @@
  */
 #define MODIFY_DHCP_MSGS        CONFIG_EXAMPLE_MODIFY_DHCP_MESSAGES
 
-static const char *TAG = "example_wired_ethernet";
+static const char *TAG = "wt32_bridge_eth";
 static esp_eth_handle_t s_eth_handle = NULL;
 static bool s_ethernet_is_connected = false;
 static uint8_t s_eth_mac[6];
 static wired_rx_cb_t s_rx_cb = NULL;
 static wired_free_cb_t s_free_cb = NULL;
+
+typedef struct {
+    bool valid;
+    uint8_t mac[6];
+} wired_client_state_t;
+
+static wired_client_state_t s_wired_client;
+static portMUX_TYPE s_wired_client_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_wired_client_conflict_logged;
+
+static bool mac_is_zero(const uint8_t mac[6])
+{
+    for (size_t i = 0; i < 6; ++i) {
+        if (mac[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mac_is_usable_unicast(const uint8_t mac[6])
+{
+    return mac != NULL && !(mac[0] & 0x01) && !mac_is_zero(mac);
+}
+
+static void wired_client_reset(void)
+{
+    portENTER_CRITICAL(&s_wired_client_lock);
+    memset(&s_wired_client, 0, sizeof(s_wired_client));
+    s_wired_client_conflict_logged = false;
+    portEXIT_CRITICAL(&s_wired_client_lock);
+}
+
+static bool wired_client_snapshot(uint8_t mac[6])
+{
+    bool valid;
+    portENTER_CRITICAL(&s_wired_client_lock);
+    valid = s_wired_client.valid;
+    if (valid) {
+        memcpy(mac, s_wired_client.mac, sizeof(s_wired_client.mac));
+    }
+    portEXIT_CRITICAL(&s_wired_client_lock);
+    return valid;
+}
+
+static void wired_client_learn(const uint8_t mac[6], const uint8_t own_mac[6])
+{
+    if (!mac_is_usable_unicast(mac) ||
+            memcmp(mac, own_mac, 6) == 0 ||
+            memcmp(mac, s_eth_mac, 6) == 0) {
+        return;
+    }
+
+    bool learned = false;
+    portENTER_CRITICAL(&s_wired_client_lock);
+    if (!s_wired_client.valid) {
+        memcpy(s_wired_client.mac, mac, sizeof(s_wired_client.mac));
+        s_wired_client.valid = true;
+        learned = true;
+    }
+    portEXIT_CRITICAL(&s_wired_client_lock);
+
+    if (learned) {
+        ESP_LOGI(TAG, "Wired client MAC learned: %02x:%02x:%02x:%02x:%02x:%02x",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+}
 
 /**
  * @brief Event handler for Ethernet events
@@ -65,12 +133,14 @@ void eth_event_handler(void *arg, esp_event_base_t event_base,
             esp_netif_dhcps_stop(netif);
         }
         s_ethernet_is_connected = false;
+        wired_client_reset();
         break;
     case ETHERNET_EVENT_START:
         ESP_LOGI(TAG, "Ethernet Started");
         break;
     case ETHERNET_EVENT_STOP:
         ESP_LOGI(TAG, "Ethernet Stopped");
+        wired_client_reset();
         break;
     default:
         ESP_LOGI(TAG, "Default Event");
@@ -142,138 +212,146 @@ static void update_udp_checksum(uint16_t *udp_header, uint16_t* ip_header)
 }
 #endif // MODIFY_DHCP_MSGS
 
-void mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, uint8_t own_mac[6])
+bool mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, uint8_t own_mac[6])
 {
-    if (!s_ethernet_is_connected) {
-        return;
+    if (!s_ethernet_is_connected || buffer == NULL || own_mac == NULL || len < 14) {
+        return false;
     }
-    static uint8_t eth_nic_mac[6] = {};
-    static bool eth_nic_mac_found = false;
-/* 【修复】原官方条件编译有 bug：
- * ap_mac 的使用处条件为 !ETH_BRIDGE_PROMISCUOUS || MODIFY_DHCP_MSGS，
- * 但声明处只有 !ETH_BRIDGE_PROMISCUOUS，导致
- * 混杂模式(y) + DHCP修改(y) 组合时编译报"undeclared"。
- * 这里把声明条件补齐，与使用处一致。 */
+
 #if !ETH_BRIDGE_PROMISCUOUS || MODIFY_DHCP_MSGS
-    static uint8_t ap_mac[6] = {};
-    static bool ap_mac_found = false;
+    static uint8_t ap_mac[6] = {0};
+    static bool ap_mac_found;
 #endif
     uint8_t *dest_mac = buffer;
     uint8_t *src_mac = buffer + 6;
     uint8_t *eth_type = buffer + 12;
-    if (eth_type[0] == 0x08) {      // support only IPv4
-        // try to find NIC HW address (look for DHCP discovery packet)
-        if ( (!eth_nic_mac_found || (MODIFY_DHCP_MSGS)) && direction == FROM_WIRED && eth_type[1] == 0x00) {  // ETH IP4
+
+    /* Learn the one supported wired client from its first valid unicast frame. */
+    if (direction == FROM_WIRED) {
+        wired_client_learn(src_mac, own_mac);
+    }
+
+    uint8_t client_mac[6] = {0};
+    bool client_valid = wired_client_snapshot(client_mac);
+    if (direction == FROM_WIRED) {
+        if (!client_valid || memcmp(src_mac, client_mac, sizeof(client_mac)) != 0) {
+            bool log_conflict = false;
+            portENTER_CRITICAL(&s_wired_client_lock);
+            if (!s_wired_client_conflict_logged) {
+                s_wired_client_conflict_logged = true;
+                log_conflict = true;
+            }
+            portEXIT_CRITICAL(&s_wired_client_lock);
+            if (log_conflict) {
+                ESP_LOGW(TAG, "Ignoring additional wired client; reconnect or restart to switch device");
+            }
+            return false;
+        }
+        memcpy(src_mac, own_mac, 6);
+    } else if (client_valid && memcmp(dest_mac, own_mac, 6) == 0) {
+        memcpy(dest_mac, client_mac, 6);
+    }
+
+    if (eth_type[0] == 0x08 && client_valid) {
+        uint8_t *frame_end = buffer + len;
+        if (eth_type[1] == 0x00) {
             uint8_t *ip_header = eth_type + 2;
-            if (len > MIN_DHCP_PACKET_SIZE && (ip_header[0] & 0xF0) == IP_V4 && ip_header[9] == IP_PROTO_UDP) {
+            if (len > MIN_DHCP_PACKET_SIZE &&
+                    (ip_header[0] & 0xF0) == IP_V4 &&
+                    ip_header[9] == IP_PROTO_UDP) {
                 uint8_t *udp_header = ip_header + IP_HEADER_SIZE;
-                const uint8_t dhcp_ports[] = {0, DHCP_PORT_OUT, 0, DHCP_PORT_IN};
-                if (memcmp(udp_header, dhcp_ports, sizeof(dhcp_ports)) == 0) {
-                    uint8_t *dhcp_magic = udp_header + DHCP_MACIG_COOKIE_OFFSET;
-                    const uint8_t dhcp_type[] = DHCP_COOKIE_WITH_PKT_TYPE(DHCP_DISCOVER);
-                    if (!eth_nic_mac_found && memcmp(dhcp_magic, dhcp_type, sizeof(dhcp_type)) == 0) {
-                        eth_nic_mac_found = true;
-                        memcpy(eth_nic_mac, src_mac, 6);
-                    }
+                if (udp_header + 8 <= frame_end) {
+                    if (direction == FROM_WIRED &&
+                            udp_header[0] == 0 && udp_header[1] == DHCP_PORT_OUT &&
+                            udp_header[2] == 0 && udp_header[3] == DHCP_PORT_IN) {
+                        uint8_t *dhcp_magic = udp_header + DHCP_MACIG_COOKIE_OFFSET;
+                        if (dhcp_magic + 7 <= frame_end) {
 #if MODIFY_DHCP_MSGS
-                    if (eth_nic_mac_found) {
-                        bool update_checksum = false;
-                        // Replace the BOOTP HW address
-                        uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
-                        if (memcmp(dhcp_client_hw_addr, eth_nic_mac, 6) == 0) {
-                            memcpy(dhcp_client_hw_addr, own_mac, 6);
-                            update_checksum = true;
-                        }
-                        // Replace the HW address in opt-61
-                        uint8_t *dhcp_opts = dhcp_magic + 4;
-                        while (*dhcp_opts != 0xFF) {
-                            if (dhcp_opts[0] == 61 && dhcp_opts[1] == 7 /* size (type=1 + mac=6) */ && dhcp_opts[2] == 1 /* HW address type*/ &&
-                                memcmp(dhcp_opts + 3, eth_nic_mac, 6) == 0) {
+                            bool update_checksum = false;
+                            uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
+                            if (dhcp_client_hw_addr + 6 <= frame_end &&
+                                    memcmp(dhcp_client_hw_addr, client_mac, 6) == 0) {
+                                memcpy(dhcp_client_hw_addr, own_mac, 6);
                                 update_checksum = true;
-                                memcpy(dhcp_opts + 3, own_mac, 6);
-                                break;
                             }
-                            dhcp_opts += dhcp_opts[1]+ 2;
-                            if (dhcp_opts - buffer >= len) {
-                                break;
+
+                            uint8_t *option = dhcp_magic + 4;
+                            while (option < frame_end) {
+                                if (*option == 0xFF) {
+                                    break;
+                                }
+                                if (*option == 0) {
+                                    ++option;
+                                    continue;
+                                }
+                                if (option + 2 > frame_end) {
+                                    break;
+                                }
+                                size_t option_len = option[1];
+                                if (option + 2 + option_len > frame_end) {
+                                    break;
+                                }
+                                if (option[0] == 61 && option_len == 7 && option[2] == 1 &&
+                                        memcmp(option + 3, client_mac, 6) == 0) {
+                                    memcpy(option + 3, own_mac, 6);
+                                    update_checksum = true;
+                                    break;
+                                }
+                                option += 2 + option_len;
                             }
+                            if (update_checksum) {
+                                update_udp_checksum((uint16_t *)udp_header, (uint16_t *)ip_header);
+                            }
+#endif
                         }
-                        if (update_checksum) {
-                            update_udp_checksum((uint16_t *) udp_header, (uint16_t *) ip_header);
-                        }
-                    }
-#endif // MODIFY_DHCP_MSGS
-                }   // DHCP
-            } // UDP/IP
-#if !ETH_BRIDGE_PROMISCUOUS || MODIFY_DHCP_MSGS
-            // try to find AP HW address (look for DHCP offer packet)
-        } else if ( (!ap_mac_found || (MODIFY_DHCP_MSGS)) && direction == TO_WIRED && eth_type[1] == 0x00) {  // ETH IP4
-            uint8_t *ip_header = eth_type + 2;
-            if (len > MIN_DHCP_PACKET_SIZE && (ip_header[0] & 0xF0) == IP_V4 && ip_header[9] == IP_PROTO_UDP) {
-                uint8_t *udp_header = ip_header + IP_HEADER_SIZE;
-                const uint8_t dhcp_ports[] = {0, DHCP_PORT_IN, 0, DHCP_PORT_OUT};
-                if (memcmp(udp_header, dhcp_ports, sizeof(dhcp_ports)) == 0) {
-                    uint8_t *dhcp_magic = udp_header + DHCP_MACIG_COOKIE_OFFSET;
+                    } else if (direction == TO_WIRED &&
+                               udp_header[0] == 0 && udp_header[1] == DHCP_PORT_IN &&
+                               udp_header[2] == 0 && udp_header[3] == DHCP_PORT_OUT) {
+                        uint8_t *dhcp_magic = udp_header + DHCP_MACIG_COOKIE_OFFSET;
+                        if (dhcp_magic + 7 <= frame_end) {
 #if MODIFY_DHCP_MSGS
-                    if (eth_nic_mac_found) {
-                        uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
-                        // Replace BOOTP HW address
-                        if (memcmp(dhcp_client_hw_addr, own_mac, 6) == 0) {
-                            memcpy(dhcp_client_hw_addr, eth_nic_mac, 6);
-                            update_udp_checksum((uint16_t*)udp_header, (uint16_t*)ip_header);
+                            uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
+                            if (dhcp_client_hw_addr + 6 <= frame_end &&
+                                    memcmp(dhcp_client_hw_addr, own_mac, 6) == 0) {
+                                memcpy(dhcp_client_hw_addr, client_mac, 6);
+                                update_udp_checksum((uint16_t *)udp_header, (uint16_t *)ip_header);
+                            }
+#endif
+                            const uint8_t dhcp_type[] = DHCP_COOKIE_WITH_PKT_TYPE(DHCP_OFFER);
+                            if (!ap_mac_found && memcmp(dhcp_magic, dhcp_type, sizeof(dhcp_type)) == 0) {
+                                ap_mac_found = true;
+                                memcpy(ap_mac, src_mac, sizeof(ap_mac));
+                            }
                         }
                     }
-#endif // MODIFY_DHCP_MSGS
-                    const uint8_t dhcp_type[] = DHCP_COOKIE_WITH_PKT_TYPE(DHCP_OFFER);
-                    if (!ap_mac_found && memcmp(dhcp_magic, dhcp_type, sizeof(dhcp_type)) == 0) {
-                        ap_mac_found = true;
-                        memcpy(ap_mac, src_mac, 6);
-                    }
-                }   // DHCP
-            } // UDP/IP
-#endif // !ETH_BRIDGE_PROMISCUOUS || MODIFY_DHCP_MSGS
+                }
+            }
         }
 
-        // swap addresses in ARP probes
-        if (eth_type[1] == 0x06) { // ARP
-            uint8_t *arp = eth_type + 2 + 8; // points to sender's HW address
-            /* 【静态IP适配】不发 DHCP 的设备（静态 IP）永远学不到 eth_nic_mac，只能裸 MAC 透传，
-             * 空口上出现"载荷源 MAC ≠ ESP32 STA MAC"的帧——部分路由器会直接丢弃这类帧。
-             * 这里从首个上行 ARP 帧学习有线端 MAC，让静态设备同样进 NAT 路径
-             * （空口只出现 ESP32 的 MAC，与 DHCP 客户端已验证跑通的路径一致）。 */
-            if (!eth_nic_mac_found && direction == FROM_WIRED) {
-                eth_nic_mac_found = true;
-                memcpy(eth_nic_mac, arp, 6);
-                ESP_LOGI(TAG, "Wired client MAC learned from ARP: %02x:%02x:%02x:%02x:%02x:%02x",
-                         eth_nic_mac[0], eth_nic_mac[1], eth_nic_mac[2],
-                         eth_nic_mac[3], eth_nic_mac[4], eth_nic_mac[5]);
-            }
-            if (eth_nic_mac_found && direction == FROM_WIRED && memcmp(arp, eth_nic_mac, 6) == 0) {
-                /* updates senders HW address to our wireless */
-                memcpy(arp, own_mac, 6);
+        if (eth_type[1] == 0x06 && len >= 14 + 28) {
+            uint8_t *arp_sender_mac = eth_type + 2 + 8;
+            if (direction == FROM_WIRED && memcmp(arp_sender_mac, client_mac, 6) == 0) {
+                memcpy(arp_sender_mac, own_mac, 6);
 #if !ETH_BRIDGE_PROMISCUOUS
-            } else if (ap_mac_found && direction == TO_WIRED && memcmp(arp, ap_mac, 6) == 0) {
-                /* updates senders HW address to our wired */
-                memcpy(arp, s_eth_mac, 6);
-#endif // !ETH_BRIDGE_PROMISCUOUS
+            } else if (direction == TO_WIRED && ap_mac_found &&
+                       memcmp(arp_sender_mac, ap_mac, 6) == 0) {
+                memcpy(arp_sender_mac, s_eth_mac, 6);
+#endif
             }
         }
-        // swap HW addresses in ETH frames
+    }
+
 #if !ETH_BRIDGE_PROMISCUOUS
-        if (ap_mac_found && direction == FROM_WIRED && memcmp(dest_mac, s_eth_mac, 6) == 0) {
+    if (ap_mac_found) {
+        if (direction == FROM_WIRED && memcmp(dest_mac, s_eth_mac, 6) == 0) {
             memcpy(dest_mac, ap_mac, 6);
-        }
-        if (ap_mac_found && direction == TO_WIRED && memcmp(src_mac, ap_mac, 6) == 0) {
+        } else if (direction == TO_WIRED && memcmp(src_mac, ap_mac, 6) == 0) {
             memcpy(src_mac, s_eth_mac, 6);
         }
-#endif // !ETH_BRIDGE_PROMISCUOUS
-        if (eth_nic_mac_found && direction == FROM_WIRED && memcmp(src_mac, eth_nic_mac, 6) == 0) {
-            memcpy(src_mac, own_mac, 6);
-        }
-        if (eth_nic_mac_found && direction == TO_WIRED && memcmp(dest_mac, own_mac, 6) == 0) {
-            memcpy(dest_mac, eth_nic_mac, 6);
-        }
-    }   // IP4 section of eth-type (0x08) both ETH-IP4 and ETHARP
+    }
+#endif
+
+    return true;
 }
 
 static esp_err_t wired_recv(esp_eth_handle_t eth_handle, uint8_t *buffer, uint32_t len, void *priv)

@@ -10,7 +10,9 @@ else()
     set(wired_iface usb_ncm_iface.c)
 endif()
 
-idf_component_register(SRCS sta2eth_main.c
+idf_component_register(SRCS bridge_main.c
+                            wifi_profile_store.c
+                            wifi_profile_prov.c
                             ${wired_iface}
                             ${config_method}
                        PRIV_REQUIRES esp_wifi esp_timer esp_eth esp_http_server

@@ -11,7 +11,7 @@
 #include "esp_http_server.h"
 #include "dns_server.h"
 
-static const char *TAG = "NCM_configuration";
+static const char *TAG = "wt32_bridge_config";
 static httpd_handle_t s_web_server = NULL;
 static EventGroupHandle_t *s_flags = NULL;
 static int s_success_bit;
