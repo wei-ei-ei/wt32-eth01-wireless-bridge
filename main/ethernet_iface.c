@@ -13,7 +13,6 @@
 #include "esp_mac.h"
 #include "ethernet_init.h"
 #include "esp_eth_netif_glue.h"
-#include "freertos/FreeRTOS.h"
 
 /**
  *  Disable promiscuous mode on Ethernet interface by setting this macro to 0
@@ -36,71 +35,42 @@ static uint8_t s_eth_mac[6];
 static wired_rx_cb_t s_rx_cb = NULL;
 static wired_free_cb_t s_free_cb = NULL;
 
-typedef struct {
-    bool valid;
-    uint8_t mac[6];
-} wired_client_state_t;
-
-static wired_client_state_t s_wired_client;
-static portMUX_TYPE s_wired_client_lock = portMUX_INITIALIZER_UNLOCKED;
-static bool s_wired_client_conflict_logged;
-
-static bool mac_is_zero(const uint8_t mac[6])
-{
-    for (size_t i = 0; i < 6; ++i) {
-        if (mac[i] != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool mac_is_usable_unicast(const uint8_t mac[6])
-{
-    return mac != NULL && !(mac[0] & 0x01) && !mac_is_zero(mac);
-}
+static uint8_t s_eth_nic_mac[6];
+static volatile bool s_eth_nic_mac_found;
 
 static void wired_client_reset(void)
 {
-    portENTER_CRITICAL(&s_wired_client_lock);
-    memset(&s_wired_client, 0, sizeof(s_wired_client));
-    s_wired_client_conflict_logged = false;
-    portEXIT_CRITICAL(&s_wired_client_lock);
+    memset(s_eth_nic_mac, 0, sizeof(s_eth_nic_mac));
+    s_eth_nic_mac_found = false;
 }
 
-static bool wired_client_snapshot(uint8_t mac[6])
+static bool mac_is_valid_unicast(const uint8_t mac[6])
 {
-    bool valid;
-    portENTER_CRITICAL(&s_wired_client_lock);
-    valid = s_wired_client.valid;
-    if (valid) {
-        memcpy(mac, s_wired_client.mac, sizeof(s_wired_client.mac));
+    if (mac[0] & 0x01) {
+        return false;
     }
-    portEXIT_CRITICAL(&s_wired_client_lock);
-    return valid;
+    for (size_t i = 0; i < 6; ++i) {
+        if (mac[i] != 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
-static void wired_client_learn(const uint8_t mac[6], const uint8_t own_mac[6])
+static void wired_client_maybe_learn(const uint8_t src_mac[6], const uint8_t own_mac[6])
 {
-    if (!mac_is_usable_unicast(mac) ||
-            memcmp(mac, own_mac, 6) == 0 ||
-            memcmp(mac, s_eth_mac, 6) == 0) {
+    if (s_eth_nic_mac_found ||
+            !mac_is_valid_unicast(src_mac) ||
+            memcmp(src_mac, own_mac, 6) == 0 ||
+            memcmp(src_mac, s_eth_mac, 6) == 0) {
         return;
     }
 
-    bool learned = false;
-    portENTER_CRITICAL(&s_wired_client_lock);
-    if (!s_wired_client.valid) {
-        memcpy(s_wired_client.mac, mac, sizeof(s_wired_client.mac));
-        s_wired_client.valid = true;
-        learned = true;
-    }
-    portEXIT_CRITICAL(&s_wired_client_lock);
-
-    if (learned) {
-        ESP_LOGI(TAG, "Wired client MAC learned: %02x:%02x:%02x:%02x:%02x:%02x",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    }
+    memcpy(s_eth_nic_mac, src_mac, sizeof(s_eth_nic_mac));
+    s_eth_nic_mac_found = true;
+    ESP_LOGI(TAG, "Wired client MAC learned: %02x:%02x:%02x:%02x:%02x:%02x",
+             s_eth_nic_mac[0], s_eth_nic_mac[1], s_eth_nic_mac[2],
+             s_eth_nic_mac[3], s_eth_nic_mac[4], s_eth_nic_mac[5]);
 }
 
 /**
@@ -226,35 +196,14 @@ bool mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, u
     uint8_t *src_mac = buffer + 6;
     uint8_t *eth_type = buffer + 12;
 
-    /* Learn the one supported wired client from its first valid unicast frame. */
     if (direction == FROM_WIRED) {
-        wired_client_learn(src_mac, own_mac);
+        wired_client_maybe_learn(src_mac, own_mac);
     }
 
-    uint8_t client_mac[6] = {0};
-    bool client_valid = wired_client_snapshot(client_mac);
-    if (direction == FROM_WIRED) {
-        if (!client_valid || memcmp(src_mac, client_mac, sizeof(client_mac)) != 0) {
-            bool log_conflict = false;
-            portENTER_CRITICAL(&s_wired_client_lock);
-            if (!s_wired_client_conflict_logged) {
-                s_wired_client_conflict_logged = true;
-                log_conflict = true;
-            }
-            portEXIT_CRITICAL(&s_wired_client_lock);
-            if (log_conflict) {
-                ESP_LOGW(TAG, "Ignoring additional wired client; reconnect or restart to switch device");
-            }
-            return false;
-        }
-        memcpy(src_mac, own_mac, 6);
-    } else if (client_valid && memcmp(dest_mac, own_mac, 6) == 0) {
-        memcpy(dest_mac, client_mac, 6);
-    }
-
-    if (eth_type[0] == 0x08 && client_valid) {
+    if (eth_type[0] == 0x08) {
         uint8_t *frame_end = buffer + len;
-        if (eth_type[1] == 0x00) {
+        if ((!s_eth_nic_mac_found || MODIFY_DHCP_MSGS) &&
+                direction == FROM_WIRED && eth_type[1] == 0x00) {
             uint8_t *ip_header = eth_type + 2;
             if (len > MIN_DHCP_PACKET_SIZE &&
                     (ip_header[0] & 0xF0) == IP_V4 &&
@@ -266,55 +215,85 @@ bool mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, u
                             udp_header[2] == 0 && udp_header[3] == DHCP_PORT_IN) {
                         uint8_t *dhcp_magic = udp_header + DHCP_MACIG_COOKIE_OFFSET;
                         if (dhcp_magic + 7 <= frame_end) {
+                            const uint8_t dhcp_type[] = DHCP_COOKIE_WITH_PKT_TYPE(DHCP_DISCOVER);
+                            if (!s_eth_nic_mac_found &&
+                                    memcmp(dhcp_magic, dhcp_type, sizeof(dhcp_type)) == 0) {
+                                s_eth_nic_mac_found = true;
+                                memcpy(s_eth_nic_mac, src_mac, sizeof(s_eth_nic_mac));
+                                ESP_LOGI(TAG,
+                                         "Wired client MAC learned from DHCP: "
+                                         "%02x:%02x:%02x:%02x:%02x:%02x",
+                                         s_eth_nic_mac[0], s_eth_nic_mac[1],
+                                         s_eth_nic_mac[2], s_eth_nic_mac[3],
+                                         s_eth_nic_mac[4], s_eth_nic_mac[5]);
+                            }
 #if MODIFY_DHCP_MSGS
-                            bool update_checksum = false;
-                            uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
-                            if (dhcp_client_hw_addr + 6 <= frame_end &&
-                                    memcmp(dhcp_client_hw_addr, client_mac, 6) == 0) {
-                                memcpy(dhcp_client_hw_addr, own_mac, 6);
-                                update_checksum = true;
-                            }
-
-                            uint8_t *option = dhcp_magic + 4;
-                            while (option < frame_end) {
-                                if (*option == 0xFF) {
-                                    break;
-                                }
-                                if (*option == 0) {
-                                    ++option;
-                                    continue;
-                                }
-                                if (option + 2 > frame_end) {
-                                    break;
-                                }
-                                size_t option_len = option[1];
-                                if (option + 2 + option_len > frame_end) {
-                                    break;
-                                }
-                                if (option[0] == 61 && option_len == 7 && option[2] == 1 &&
-                                        memcmp(option + 3, client_mac, 6) == 0) {
-                                    memcpy(option + 3, own_mac, 6);
+                            if (s_eth_nic_mac_found) {
+                                bool update_checksum = false;
+                                uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
+                                if (dhcp_client_hw_addr + 6 <= frame_end &&
+                                        memcmp(dhcp_client_hw_addr, s_eth_nic_mac, 6) == 0) {
+                                    memcpy(dhcp_client_hw_addr, own_mac, 6);
                                     update_checksum = true;
-                                    break;
                                 }
-                                option += 2 + option_len;
-                            }
-                            if (update_checksum) {
-                                update_udp_checksum((uint16_t *)udp_header, (uint16_t *)ip_header);
+
+                                uint8_t *option = dhcp_magic + 4;
+                                while (option < frame_end) {
+                                    if (*option == 0xFF) {
+                                        break;
+                                    }
+                                    if (*option == 0) {
+                                        ++option;
+                                        continue;
+                                    }
+                                    if (option + 2 > frame_end) {
+                                        break;
+                                    }
+                                    size_t option_len = option[1];
+                                    if (option + 2 + option_len > frame_end) {
+                                        break;
+                                    }
+                                    if (option[0] == 61 && option_len == 7 && option[2] == 1 &&
+                                            memcmp(option + 3, s_eth_nic_mac, 6) == 0) {
+                                        memcpy(option + 3, own_mac, 6);
+                                        update_checksum = true;
+                                        break;
+                                    }
+                                    option += 2 + option_len;
+                                }
+                                if (update_checksum) {
+                                    update_udp_checksum((uint16_t *)udp_header,
+                                                        (uint16_t *)ip_header);
+                                }
                             }
 #endif
                         }
-                    } else if (direction == TO_WIRED &&
+                    }
+                }
+            }
+#if !ETH_BRIDGE_PROMISCUOUS || MODIFY_DHCP_MSGS
+        } else if ((!ap_mac_found || MODIFY_DHCP_MSGS) &&
+                   direction == TO_WIRED && eth_type[1] == 0x00) {
+            uint8_t *ip_header = eth_type + 2;
+            if (len > MIN_DHCP_PACKET_SIZE &&
+                    (ip_header[0] & 0xF0) == IP_V4 &&
+                    ip_header[9] == IP_PROTO_UDP) {
+                uint8_t *udp_header = ip_header + IP_HEADER_SIZE;
+                if (udp_header + 8 <= frame_end) {
+                    if (direction == TO_WIRED &&
                                udp_header[0] == 0 && udp_header[1] == DHCP_PORT_IN &&
                                udp_header[2] == 0 && udp_header[3] == DHCP_PORT_OUT) {
                         uint8_t *dhcp_magic = udp_header + DHCP_MACIG_COOKIE_OFFSET;
                         if (dhcp_magic + 7 <= frame_end) {
 #if MODIFY_DHCP_MSGS
-                            uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
-                            if (dhcp_client_hw_addr + 6 <= frame_end &&
-                                    memcmp(dhcp_client_hw_addr, own_mac, 6) == 0) {
-                                memcpy(dhcp_client_hw_addr, client_mac, 6);
-                                update_udp_checksum((uint16_t *)udp_header, (uint16_t *)ip_header);
+                            if (s_eth_nic_mac_found) {
+                                uint8_t *dhcp_client_hw_addr = udp_header + DHCP_HW_ADDRESS_OFFSET;
+                                if (dhcp_client_hw_addr + 6 <= frame_end &&
+                                        memcmp(dhcp_client_hw_addr, own_mac, 6) == 0) {
+                                    memcpy(dhcp_client_hw_addr, s_eth_nic_mac, 6);
+                                    update_udp_checksum((uint16_t *)udp_header,
+                                                        (uint16_t *)ip_header);
+                                }
                             }
 #endif
                             const uint8_t dhcp_type[] = DHCP_COOKIE_WITH_PKT_TYPE(DHCP_OFFER);
@@ -327,10 +306,20 @@ bool mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, u
                 }
             }
         }
+#endif
 
         if (eth_type[1] == 0x06 && len >= 14 + 28) {
             uint8_t *arp_sender_mac = eth_type + 2 + 8;
-            if (direction == FROM_WIRED && memcmp(arp_sender_mac, client_mac, 6) == 0) {
+            if (!s_eth_nic_mac_found && direction == FROM_WIRED) {
+                s_eth_nic_mac_found = true;
+                memcpy(s_eth_nic_mac, arp_sender_mac, sizeof(s_eth_nic_mac));
+                ESP_LOGI(TAG, "Wired client MAC learned from ARP: "
+                         "%02x:%02x:%02x:%02x:%02x:%02x",
+                         s_eth_nic_mac[0], s_eth_nic_mac[1], s_eth_nic_mac[2],
+                         s_eth_nic_mac[3], s_eth_nic_mac[4], s_eth_nic_mac[5]);
+            }
+            if (s_eth_nic_mac_found && direction == FROM_WIRED &&
+                    memcmp(arp_sender_mac, s_eth_nic_mac, 6) == 0) {
                 memcpy(arp_sender_mac, own_mac, 6);
 #if !ETH_BRIDGE_PROMISCUOUS
             } else if (direction == TO_WIRED && ap_mac_found &&
@@ -339,17 +328,27 @@ bool mac_spoof(mac_spoof_direction_t direction, uint8_t *buffer, uint16_t len, u
 #endif
             }
         }
-    }
 
 #if !ETH_BRIDGE_PROMISCUOUS
-    if (ap_mac_found) {
-        if (direction == FROM_WIRED && memcmp(dest_mac, s_eth_mac, 6) == 0) {
-            memcpy(dest_mac, ap_mac, 6);
-        } else if (direction == TO_WIRED && memcmp(src_mac, ap_mac, 6) == 0) {
-            memcpy(src_mac, s_eth_mac, 6);
+        if (ap_mac_found) {
+            if (direction == FROM_WIRED && memcmp(dest_mac, s_eth_mac, 6) == 0) {
+                memcpy(dest_mac, ap_mac, 6);
+            } else if (direction == TO_WIRED && memcmp(src_mac, ap_mac, 6) == 0) {
+                memcpy(src_mac, s_eth_mac, 6);
+            }
         }
-    }
 #endif
+
+    }
+
+    if (s_eth_nic_mac_found && direction == FROM_WIRED &&
+            memcmp(src_mac, s_eth_nic_mac, 6) == 0) {
+        memcpy(src_mac, own_mac, 6);
+    }
+    if (s_eth_nic_mac_found && direction == TO_WIRED &&
+            memcmp(dest_mac, own_mac, 6) == 0) {
+        memcpy(dest_mac, s_eth_nic_mac, 6);
+    }
 
     return true;
 }
