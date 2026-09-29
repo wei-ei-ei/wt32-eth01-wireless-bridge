@@ -54,7 +54,7 @@
   其他 IDF 版本的示例目录位置与内部 API 均有差异（如 `esp_wifi_internal_reg_rxcb` 等私有接口），
   直接换版本编译不保证通过；
 - 依赖组件随 `main/idf_component.yml` 由 Component Manager 自动拉取：`espressif/ethernet_init`、`espressif/network_provisioning`；
-- Windows 下若工具链不在默认位置，需设置环境变量（参考文末附录）
+- Windows 下推荐直接使用仓库根目录的 `idf.ps1`，它会自动设置 `IDF_TOOLS_PATH`、`TEMP`、`TMP` 并加载 ESP-IDF。
 
 ### 2. 编译烧录
 
@@ -63,7 +63,7 @@ WT32-ETH01 **没有自动下载电路**，烧录需手动进 bootloader：
 1. **IO0 接 GND** → 模块断电再上电（进入下载模式）
 2. 烧录：
    ```powershell
-   idf.py -p COM15 flash monitor
+   .\idf.ps1 -p COM15 flash monitor
    ```
 3. **拔掉 IO0 接地线** → 断电重新上电，模块自动运行
 
@@ -164,12 +164,32 @@ PRIORITY <id> <0-255>
 
 ## 附录：特殊环境配置（工具链非默认位置）
 
+使用仓库自带的 PowerShell 入口，不需要每次手动设置路径：
+
 ```powershell
-cd E:\esp-idf\esp-idf-v6.0.2
-set IDF_TOOLS_PATH=E:\.espressif
-set TEMP=E:\esp_temp
-set TMP=E:\esp_temp
-.\export.ps1
-cd project\wt32-eth01-bridge
-idf.py build
+cd E:\esp-idf\esp-idf-v6.0.2\project\wt32-eth01-bridge
+.\idf.ps1 build
+.\idf.ps1 -p COM15 flash monitor
+.\idf.ps1 menuconfig
+```
+
+默认配置：
+
+- ESP-IDF：`E:\esp-idf\esp-idf-v6.0.2`
+- IDF 工具链：`E:\.espressif`
+- 临时目录：仓库内 `tmp\esp_temp`
+
+换电脑或更换工具链位置时，只需设置环境变量，不需要改脚本：
+
+```powershell
+$env:WT32_IDF_PATH = "D:\esp-idf\esp-idf-v6.0.2"
+$env:WT32_IDF_TOOLS_PATH = "D:\.espressif"
+$env:WT32_TEMP = "D:\esp_temp"
+.\idf.ps1 build
+```
+
+如果 PowerShell 禁止执行本地脚本，可在当前用户范围允许签名脚本：
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
