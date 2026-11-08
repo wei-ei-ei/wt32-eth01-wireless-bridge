@@ -1,83 +1,91 @@
-# WT32-ETH01 通用无线网桥 · 多类型有线设备无感 WiFi 接入
+<div align="center">
 
-> BLE 蓝牙配网 · WiFi↔以太网 L2 透明桥接 · 静态 IP / DHCP · 多 Wi-Fi 配置管理
+**English** | [简体中文](README_zh-CN.md)
+
+</div>
+
+# WT32-ETH01 Universal Wireless Bridge · Seamless Wi-Fi Access for Any Wired Device
+
+> BLE provisioning · Wi-Fi↔Ethernet L2 transparent bridging · Static IP / DHCP · Multi-profile Wi-Fi management
 >
-> 让只有**有线网口**的设备（IP 摄像头、电脑、NVR、工控板等）——**插上网线即接入 WiFi 网络**，无需安装驱动。当前固件同一时间支持一台有线客户端。
+> Give devices that only have a **wired Ethernet port** (IP cameras, PCs, NVRs, industrial controllers, etc.) **plug-and-play access to a Wi-Fi network** — just connect a cable, no drivers required. The current firmware supports one wired client at a time.
 
 ---
 
-## 一、应用场景
+## 1. Use Case
 
 ```
-                 ┌──────────────────┐  网线   ┌─────────────────┐   WiFi    ┌────────┐
-  局域网 / 云端  │ IPC / PC / NVR / │────────│  WT32-ETH01 网桥  │──────────│  路由器  │
-                │ 工控板等有线设备 │        │ ESP32+LAN8720    │  2.4GHz  └────────┘
-                 └──────────────────┘        └─────────────────┘
+                           ethernet                        Wi-Fi (2.4 GHz)
+   ┌──────────────────────┐         ┌──────────────────────┐         ┌────────┐
+   │ IPC / PC / NVR / PLC │─────────│ WT32-ETH01 bridge    │─────────│ Router │
+   │ (any wired device)   │         │ ESP32 + LAN8720      │         └────────┘
+   └──────────────────────┘         └──────────────────────┘
+              LAN / Cloud
 ```
 
-- 设备只拥有百兆以太网口、**没有 WiFi**，靠网桥接入无线网络；
-- 网桥对设备透明：设备**保持自己的 IP**（静态或 DHCP 均可），同一局域网内仍可直接访问该 IP，无需端口映射；
-- 支持不同设备类型依次接入，通过网线插拔触发客户端 MAC 重学；
-- 网桥最多保存 16 组 Wi-Fi，正常启动只读取当前选中的一组；
-- 换 WiFi 环境：**长按按键 2 秒** → 蓝牙配网（手机 App），全程不需要接电脑。
+- Devices with only a 100 Mbps Ethernet port and **no Wi-Fi** join the wireless network through the bridge;
+- The bridge is fully transparent to the device: it **keeps its own IP** (static or DHCP), stays directly reachable at that IP within the same LAN, and needs no port mapping;
+- Different device types can connect in turn — unplugging and re-plugging the cable triggers client MAC re-learning;
+- The bridge stores up to 16 Wi-Fi profiles; a normal boot reads only the currently selected one;
+- Changing Wi-Fi environments: **long-press the button for 2 s** → BLE provisioning (phone app), no computer needed at any point.
 
-## 二、特性
+## 2. Features
 
-| 特性 | 说明 |
-|------|------|
-| L2 透明桥接 | 以太网混杂模式 + MAC 改写，同一广播域、端到端会话，IP 层无 NAT |
-| 多类型设备兼容 | IPC、电脑、NVR、工控板等标准以太网设备共用同一固件；一次接入一台 |
-| **通用 MAC 学习** | 从有线侧第一个合法单播帧学习，不依赖 DHCP 或 ARP；网线断开后自动重学 |
-| BLE 蓝牙配网 | 长按 IO2（2 秒）进入 ESP 统一配网，手机 App（ESP BLE Provisioning）下发 WiFi 凭据 |
-| 多 Wi-Fi 配置库 | 默认保存 16 组 SSID/密码，NVS 持久化；启动时只加载当前配置 |
-| BLE 配置管理端点 | 自定义 App 可列出、选择、删除 Wi-Fi，并设置选择优先级 |
-| 开机自动回连 | 当前凭据存 NVS，断电重启自动重连；连不上自动回退配网模式 |
-| 拥塞可观测 | WiFi 发送队列丢帧计数告警（`WiFi TX drop #N`），量化空口拥塞 |
-| 省电关闭 | `WIFI_PS_NONE`，避免下行流量在休眠窗口丢失 |
+| Feature | Description |
+|---------|-------------|
+| L2 transparent bridging | Ethernet promiscuous mode + MAC rewriting; single broadcast domain, end-to-end sessions, no NAT at the IP layer |
+| Multi-device-type compatible | IP cameras, PCs, NVRs, industrial controllers and other standard Ethernet devices share one firmware; one client at a time |
+| **Generic MAC learning** | Learns from the first valid unicast frame on the wired side — no dependency on DHCP or ARP; re-learns automatically after the cable is disconnected |
+| BLE provisioning | Long-press IO2 (2 s) enters ESP unified provisioning; the phone app (ESP BLE Provisioning) delivers Wi-Fi credentials |
+| Multi-profile Wi-Fi store | Saves 16 SSID/password pairs by default, persisted in NVS; boot loads only the active profile |
+| BLE management endpoint | A custom app can list, select and delete saved Wi-Fi networks, and set selection priority |
+| Auto-reconnect on boot | Active credentials are stored in NVS; power-cycle reconnects automatically, with automatic fallback to provisioning mode on failure |
+| Observable congestion | Drop-counter warning for the Wi-Fi TX queue (`WiFi TX drop #N`) to quantify radio congestion |
+| Power save disabled | `WIFI_PS_NONE` prevents downlink traffic from being lost in modem-sleep windows |
 
-## 三、硬件
+## 3. Hardware
 
-| 器件 | 型号/要求 | 备注 |
-|------|-----------|------|
-| 网桥 | WT32-ETH01（ESP32-D0WD-V3 + LAN8720AI，百兆） | 5V 供电 |
-| 有线设备 | 任意带标准 10/100M 以太网口和 TCP/IP 栈的设备 | 网桥不向外设供电，IPC 等设备需独立供电 |
-| 实测参考设备 | 海思 HI3516CV610 方案 IPC 模组 | **DC 12V/2A，不能依赖 POE 供电** |
-| 路由器 | 任意 2.4GHz WiFi 路由器 | 建议关闭"无线隔离/AP 隔离"；有双频时监控端连 5G 可显著改善延迟 |
+| Component | Model / requirement | Notes |
+|-----------|---------------------|-------|
+| Bridge | WT32-ETH01 (ESP32-D0WD-V3 + LAN8720AI, 100 Mbps) | 5 V power supply |
+| Wired device | Any device with a standard 10/100M Ethernet port and a TCP/IP stack | The bridge does not power the peripheral; cameras etc. need their own supply |
+| Field-tested reference | IP camera module based on HiSilicon HI3516CV610 | **DC 12 V / 2 A — POE power alone is not sufficient** |
+| Router | Any 2.4 GHz Wi-Fi router | Disable "wireless/AP isolation"; on dual-band routers, put the viewing client on 5 GHz for a significant latency improvement |
 
-> 硬件细节见 [`docs/WT32-ETH01硬件说明.md`](docs/WT32-ETH01硬件说明.md)，通用接入流程和摄像头实测示例见 [`docs/设备接入示例.md`](docs/设备接入示例.md)。
+> For hardware details see [`docs/WT32-ETH01硬件说明.md`](docs/WT32-ETH01硬件说明.md) *(Chinese)*; for the generic onboarding walkthrough and camera field-test notes see [`docs/设备接入示例.md`](docs/设备接入示例.md) *(Chinese)*. The documents under [`docs/`](docs/) are currently available in Chinese only.
 
-## 四、快速开始
+## 4. Quick Start
 
-### 1. 环境
+### 1. Environment
 
-- ESP-IDF **v6.0.2**：本工程由官方示例 `examples/network/sta2eth` 改造而来，**v6.0.2 为验证过的编译版本**；
-  其他 IDF 版本的示例目录位置与内部 API 均有差异（如 `esp_wifi_internal_reg_rxcb` 等私有接口），
-  直接换版本编译不保证通过；
-- 依赖组件随 `main/idf_component.yml` 由 Component Manager 自动拉取：`espressif/ethernet_init`、`espressif/network_provisioning`；
-- Windows 下推荐直接使用仓库根目录的 `idf.ps1`，它会自动设置 `IDF_TOOLS_PATH`、`TEMP`、`TMP` 并加载 ESP-IDF。
+- ESP-IDF **v6.0.2**: this project is adapted from the official example `examples/network/sta2eth`, and **v6.0.2 is the verified build version**;
+  other IDF versions differ in the example's directory layout and internal APIs (e.g. private symbols such as `esp_wifi_internal_reg_rxcb`),
+  so building against another version is not guaranteed to work;
+- Dependency components are fetched automatically by the Component Manager via `main/idf_component.yml`: `espressif/ethernet_init`, `espressif/network_provisioning`;
+- On Windows, use `idf.ps1` at the repository root: it sets `IDF_TOOLS_PATH`, `TEMP` and `TMP` automatically and loads ESP-IDF for you.
 
-### 2. 编译烧录
+### 2. Build & Flash
 
-WT32-ETH01 **没有自动下载电路**，烧录需手动进 bootloader：
+The WT32-ETH01 **has no auto-download circuit**, so entering the bootloader manually is required for flashing:
 
-1. **IO0 接 GND** → 模块断电再上电（进入下载模式）
-2. 烧录：
+1. **Connect IO0 to GND** → power the module off and back on (enters download mode)
+2. Flash:
    ```powershell
    .\idf.ps1 -p COM15 flash monitor
    ```
-3. **拔掉 IO0 接地线** → 断电重新上电，模块自动运行
+3. **Remove the IO0-to-GND wire** → power-cycle again; the module starts running automatically
 
-> 刷机后首次开机（NVS 无凭据）自动进入蓝牙配网；已有配置时串口会打印
-> `Loaded N profiles, active id M`，用于确认当前配置库状态。
+> On the first boot after flashing (empty NVS) the device enters BLE provisioning automatically; if profiles already exist, the console prints
+> `Loaded N profiles, active id M` so you can confirm the profile store state.
 
-### 3. 蓝牙配网（换 WiFi 也用这一步）
+### 3. BLE Provisioning (also used when changing Wi-Fi)
 
-1. 手机安装 **ESP BLE Provisioning** App（Espressif 官方）；
-2. **长按网桥 IO2 按键 2 秒**（触发重配网，设备重启进入配网模式）；
-3. App 扫描设备 → 发送 WiFi 名称/密码 → 配网成功后设备自动重启进入桥接；
-4. 串口看到 `Wi-Fi STA connected` 即成功。
+1. Install the **ESP BLE Provisioning** app on your phone (official Espressif app);
+2. **Long-press the bridge's IO2 button for 2 s** (triggers re-provisioning; the device reboots into provisioning mode);
+3. Scan for the device in the app → send the Wi-Fi SSID/password → on success the device reboots into bridge mode automatically;
+4. Seeing `Wi-Fi STA connected` on the console means success.
 
-官方 App 只负责新增网络。后续自定义 App 可通过 BLE 端点 `wifi-profiles` 管理已保存网络：
+The official app only adds networks. A custom app can manage saved networks through the BLE endpoint `wifi-profiles`:
 
 ```text
 LIST
@@ -87,84 +95,84 @@ DELETE <id>
 PRIORITY <id> <0-255>
 ```
 
-完整协议见 [`docs/WiFi多配置管理.md`](docs/WiFi多配置管理.md)。
+For the full protocol see [`docs/WiFi多配置管理.md`](docs/WiFi多配置管理.md) *(Chinese)*.
 
-### 4. 接入有线设备
+### 4. Connecting a Wired Device
 
-1. DHCP 设备直接接入即可；静态 IP 设备配置为**与路由器同网段、掩码一致、网关指向路由器**；
-2. 网线接入网桥；直连插拔会触发链路重连和自动 MAC 重学；
-3. 从同一 WiFi 的电脑 `ping` 设备 IP，或在串口确认 `Wi-Fi STA connected`；
-4. 串口出现 `Wired client MAC learned: xx:xx:...` = 设备已被网桥识别；
-5. 更换设备时断开并重新插入网线；通过交换机更换且链路不中断时，需要重启网桥。
+1. DHCP devices work out of the box; for static-IP devices, configure **the same subnet as the router, the same netmask, and the router as the gateway**;
+2. Plug the cable into the bridge; hot-plugging a direct connection triggers link re-establishment and automatic MAC re-learning;
+3. From a computer on the same Wi-Fi, `ping` the device's IP, or confirm `Wi-Fi STA connected` on the console;
+4. `Wired client MAC learned: xx:xx:...` on the console = the device has been recognized by the bridge;
+5. When swapping devices, unplug and re-plug the cable; when swapping through a switch without breaking the link, reboot the bridge.
 
-> 摄像头供电、静态 IP 和 RTMP 推流验证步骤见 [`docs/设备接入示例.md`](docs/设备接入示例.md)。
+> For camera power supply, static IP setup and RTMP streaming verification, see [`docs/设备接入示例.md`](docs/设备接入示例.md) *(Chinese)*.
 
-## 五、性能实测（供参考）
+## 5. Measured Performance (for reference)
 
-| 项目 | 数据 | 条件 |
-|------|------|------|
-| iperf3 TCP（单跳） | 13~14 Mbps | 对端接路由器有线侧 |
-| iperf3 TCP（两跳同频） | ~9.6 Mbps | 对端与网桥同为路由器 2.4G 无线终端 |
-| ping 延迟（两跳） | 5~11 ms | 信号 RSSI -44 时 |
-| 摄像头 RTMP 推流 | 可用 | 两跳场景建议码率 ≤2~3 Mbps，并观察串口 `WiFi TX drop` 计数 |
+| Test | Result | Conditions |
+|------|--------|------------|
+| iperf3 TCP (one hop) | 13–14 Mbps | Peer on the router's wired side |
+| iperf3 TCP (two hops, same band) | ~9.6 Mbps | Peer is also a 2.4 GHz wireless client of the same router |
+| Ping latency (two hops) | 5–11 ms | At RSSI −44 |
+| Camera RTMP streaming | Usable | For the two-hop case keep the bitrate ≤2–3 Mbps and watch the console's `WiFi TX drop` counter |
 
-> 同频两跳的吞吐约为单跳的 5~7 折（空口时间共享所致），是物理规律而非故障。改善：路由器开双频，监控端走 5G。
+> Two-hop throughput on the same band is roughly 50–70% of single-hop (shared radio airtime) — physics, not a fault. Improvement: enable dual band on the router and put the viewing client on 5 GHz.
 
-## 六、与官方示例的差异
+## 6. Differences from the Official Example
 
-本工程基于 Espressif 官方 `sta2eth` 示例（ESP-IDF）改造。**逐项改动说明（含原因与验证方法）见 [`docs/官方示例改动说明.md`](docs/官方示例改动说明.md)**，概要：
+This project is adapted from Espressif's official `sta2eth` example (ESP-IDF). **The itemized change list (with rationale and verification steps) is in [`docs/官方示例改动说明.md`](docs/官方示例改动说明.md) *(Chinese)***. Summary:
 
-1. **硬件适配三项**：WPA2 握手需要 SHA1（默认预设被禁）；LAN8720 复位脚 GPIO16 需拉高；RMII 50MHz 时钟为 GPIO0 **输入**（LAN8720 晶振倍频输出）；
-2. **配网方案**：网页配网 → **BLE 蓝牙配网**（`network_provisioning` + NimBLE）；
-3. **开启以太网混杂模式**：官方默认关闭，关闭时 EMAC 硬件过滤会丢弃"目的 MAC 非本机"的单播帧——这是"能上网但无法与 WiFi 侧设备互通"的直接根因；
-4. **通用 MAC 学习**：官方 MAC 槽位只认 DHCP DISCOVER，静态 IP 设备无法接入；现从首个合法上行单播帧学习，并在链路断开后清空重学；
-5. **多 Wi-Fi 配置库**：NVS 保存多组凭据，正常启动只读取当前一组，不引入逐包开销；
-6. **BLE 管理端点**：官方配网继续负责新增网络，自定义端点负责查看、选择、删除和优先级管理；
-7. **TX 丢包计数**：官方对 WiFi 发送失败只打 LOGD（不可见），现改为 WARN 级计数告警。
+1. **Three hardware adaptations**: the WPA2 handshake needs SHA1 (disabled in the default preset); the LAN8720 reset pin GPIO16 must be held high; the RMII 50 MHz clock is an **input** on GPIO0 (from the LAN8720's oscillator-doubled output);
+2. **Provisioning scheme**: web-based provisioning → **BLE provisioning** (`network_provisioning` + NimBLE);
+3. **Ethernet promiscuous mode enabled**: off by default in the official example — with it off, the EMAC hardware filter drops unicast frames not addressed to the bridge itself, the direct root cause of "internet works but Wi-Fi-side devices are unreachable";
+4. **Generic MAC learning**: the official MAC slot only recognizes DHCP DISCOVER, so static-IP devices could not connect; it now learns from the first valid upstream unicast frame and clears/re-learns after a link drop;
+5. **Multi-profile Wi-Fi store**: NVS holds multiple credentials; a normal boot reads only the active one, adding no per-packet overhead;
+6. **BLE management endpoint**: the official provisioning flow keeps handling new networks; the custom endpoint handles listing, selection, deletion and priority management;
+7. **TX drop counting**: the official code only LOGD-logs Wi-Fi send failures (invisible); it is now a WARN-level counted warning.
 
-## 七、已知限制与排查口诀
+## 7. Known Limitations & Troubleshooting
 
-| 限制/现象 | 原因 | 处理 |
-|-----------|------|------|
-| 电脑拿到 192.168.4.x | WiFi 没连上，掉进了配网模式（内置 DHCP） | 查 WiFi 环境后**断电**重启（软重启会停留在配网模式） |
-| ping 通但 TTL=128 / 0ms | 应答的是电脑自己（IP 撞车），不是目标设备 | 检查本机 IP 配置，`arp -d *` 后用正确 IP 重测 |
-| 能上网但无法与 WiFi 侧设备互通 | 混杂模式未开启（本仓库已默认开启） | 确认 `CONFIG_EXAMPLE_ETHERNET_USE_PROMISCUOUS=y` |
-| 通过交换机更换有线设备后新设备不通 | 链路没有断开，网桥仍保持第一个客户端 MAC | 断开网桥与交换机链路后重试，或重启网桥 |
-| 第二台有线设备同时接入 | 当前设计只支持单台有线客户端 | 使用交换机后仍需保证同一时间只有一台业务设备 |
-| 推流延迟持续升高不回落 | 空口容量不足 → 看串口 `WiFi TX drop` 计数 | 降码率（≤3 Mbps）、双频分流、换干净信道 |
+| Limitation / symptom | Cause | Fix |
+|----------------------|-------|-----|
+| PC gets 192.168.4.x | Wi-Fi didn't connect; the device fell into provisioning mode (built-in DHCP) | Check the Wi-Fi environment, then **power-cycle** (a soft reboot stays in provisioning mode) |
+| Ping succeeds but TTL=128 / 0 ms | The PC itself answered (IP conflict), not the target device | Check the local IP configuration; `arp -d *`, then retest with the correct IP |
+| Internet works but Wi-Fi-side devices are unreachable | Promiscuous mode disabled (enabled by default in this repo) | Verify `CONFIG_EXAMPLE_ETHERNET_USE_PROMISCUOUS=y` |
+| New device behind a switch doesn't connect after a swap | The link never dropped, so the bridge still holds the first client's MAC | Break the bridge↔switch link and retry, or reboot the bridge |
+| A second wired device connected at the same time | The current design supports a single wired client | Even behind a switch, ensure only one active device at a time |
+| Streaming latency keeps climbing and never recovers | Insufficient radio capacity → check the console's `WiFi TX drop` counter | Lower the bitrate (≤3 Mbps), offload to the other band, switch to a cleaner channel |
 
-## 八、目录结构
+## 8. Repository Layout
 
 ```
 ├── main/
-│   ├── bridge_main.c         # 主逻辑：桥接/配网分支、WiFi 事件、收发回调
-│   ├── ethernet_iface.c      # 以太网侧：MAC 改写、通用客户端学习、桥接收发
-│   ├── wifi_profile_store.c  # 多 Wi-Fi NVS 配置库
-│   ├── wifi_profile_prov.c   # BLE 配置管理端点
-│   ├── provisioning.c        # BLE 配网（network_provisioning + NimBLE）
-│   ├── usb_ncm_iface.c       # (备用) USB NCM 有线接口，以太网方案下不参与编译
-│   └── manual_config.c       # (备用) 手动配置方案
+│   ├── bridge_main.c         # Main logic: bridge/provisioning branching, Wi-Fi events, TX/RX callbacks
+│   ├── ethernet_iface.c      # Ethernet side: MAC rewriting, generic client learning, bridge TX/RX
+│   ├── wifi_profile_store.c  # Multi-profile Wi-Fi store (NVS)
+│   ├── wifi_profile_prov.c   # BLE profile-management endpoint
+│   ├── provisioning.c        # BLE provisioning (network_provisioning + NimBLE)
+│   ├── usb_ncm_iface.c       # (standby) USB NCM wired interface; not compiled in the Ethernet scheme
+│   └── manual_config.c       # (standby) manual configuration scheme
 ├── docs/
-│   ├── 官方示例改动说明.md     # 逐项改动、原因、验证方法
-│   ├── WT32-ETH01硬件说明.md  # 模块构成、引脚、时钟设计、官方资料链接
-│   ├── 设备接入示例.md          # 通用接入流程与 IPC 实测经验
-│   └── WiFi多配置管理.md      # NVS 数据结构和 BLE 管理协议
-├── mbedtls_preset_bridge.conf   # mbedtls 裁剪预设（已修正 SHA1）
-└── sdkconfig.defaults        # 本仓库全部配置差异（混杂模式、BLE、PHY、时钟…）
+│   ├── 官方示例改动说明.md     # Itemized changes vs the official example, with rationale & verification (Chinese)
+│   ├── WT32-ETH01硬件说明.md  # Module composition, pins, clock design, official links (Chinese)
+│   ├── 设备接入示例.md          # Generic onboarding walkthrough & IPC field-test experience (Chinese)
+│   └── WiFi多配置管理.md      # NVS data layout and BLE management protocol (Chinese)
+├── mbedtls_preset_bridge.conf   # mbedtls trim preset (SHA1 fixed)
+└── sdkconfig.defaults        # All config deltas of this repo (promiscuous mode, BLE, PHY, clock…)
 ```
 
-## 九、许可与致谢
+## 9. License & Acknowledgements
 
-- 代码基于 **Espressif 官方示例 `examples/network/sta2eth`**（ESP-IDF v6.0.2）改造，原文件保留 Espressif 的 SPDX 标识（`Unlicense OR CC0-1.0`）；本仓库的修改同样以该许可发布；
-- 依赖组件（`espressif/ethernet_init`、`espressif/network_provisioning` 等）许可随 IDF Component Manager 声明；
-- WT32-ETH01 规格资料版权归原厂（Wireless-Tag / 启明云端）所有，本仓库**不转载原厂 PDF**，只提供原创整理笔记与官方链接；
-- 各商标归其所有者所有。
+- The code is adapted from **Espressif's official example `examples/network/sta2eth`** (ESP-IDF v6.0.2); the original files keep Espressif's SPDX tags (`Unlicense OR CC0-1.0`), and the modifications in this repository are released under the same license;
+- Licenses of the dependency components (`espressif/ethernet_init`, `espressif/network_provisioning`, etc.) are as declared by the IDF Component Manager;
+- WT32-ETH01 specification materials are copyrighted by the original vendor (Wireless-Tag / 启明云端); this repository **does not redistribute vendor PDFs** — only original notes and official links;
+- All trademarks belong to their respective owners.
 
 ---
 
-## 附录：特殊环境配置（工具链非默认位置）
+## Appendix: Special Environment Setup (non-default toolchain location)
 
-使用仓库自带的 PowerShell 入口，不需要每次手动设置路径：
+Use the PowerShell entry script shipped with the repository; no manual path setup needed each time:
 
 ```powershell
 cd E:\esp-idf\esp-idf-v6.0.2\project\wt32-eth01-bridge
@@ -173,13 +181,13 @@ cd E:\esp-idf\esp-idf-v6.0.2\project\wt32-eth01-bridge
 .\idf.ps1 menuconfig
 ```
 
-默认配置：
+Defaults:
 
-- ESP-IDF：`E:\esp-idf\esp-idf-v6.0.2`
-- IDF 工具链：`E:\.espressif`
-- 临时目录：仓库内 `tmp\esp_temp`
+- ESP-IDF: `E:\esp-idf\esp-idf-v6.0.2`
+- IDF toolchain: `E:\.espressif`
+- Temp directory: `tmp\esp_temp` inside the repository
 
-换电脑或更换工具链位置时，只需设置环境变量，不需要改脚本：
+On a new machine or when the toolchain moves, just set environment variables — no script edits required:
 
 ```powershell
 $env:WT32_IDF_PATH = "D:\esp-idf\esp-idf-v6.0.2"
@@ -188,7 +196,7 @@ $env:WT32_TEMP = "D:\esp_temp"
 .\idf.ps1 build
 ```
 
-如果 PowerShell 禁止执行本地脚本，可在当前用户范围允许签名脚本：
+If PowerShell blocks local scripts, allow locally signed scripts for the current user:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
